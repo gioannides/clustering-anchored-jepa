@@ -634,7 +634,3 @@ if __name__ == '__main__':
     args = p.parse_args()
     main(args)
 
-"""
-
-python eval_representations_wavlm_objective_revised.py --checkpoint /home/gioannides/jepa-speech/kmeans_code_latest/WavLM_fair/wavlm_model_880000.pt --data "/home/gioannides/neurips25_ws/inworld-tts/data/librilight/librilight_processed/checkpoints/,/scratch/gioannides/granary_data/en/checkpoints/" --n_utterances 1000 --output_dir ./_wavlm_jepa_gmm_conformer_results_revised
-"""
