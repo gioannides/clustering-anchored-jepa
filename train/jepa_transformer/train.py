@@ -225,7 +225,7 @@ def train(args, temporal_shifts=None):
                 print(f"[Resume] Failed: {e}")
     
     # Training loop
-    metrics = {k: deque(maxlen=10) for k in ['jepa', 'cluster', 'cw', 'delta']}
+    metrics = {k: deque(maxlen=10) for k in ['jepa', 'cluster', 'cw']}
     pbar = tqdm(total=args.max_steps, disable=not rank0(), initial=global_step, desc="Training")
     
     dl_iter = iter(dataloader)
@@ -294,17 +294,6 @@ def train(args, temporal_shifts=None):
         m = (1 - mask).unsqueeze(1) * pad_mask.unsqueeze(1)
         jepa_loss = ((z_pred - z_target.detach()).pow(2) * m).sum() / (m.sum() * z_pred.shape[1]).clamp_min(1)
         
-        # Delta loss
-        delta_loss = torch.tensor(0.0, device=device)
-        if temporal_shifts:
-            for gap in temporal_shifts:
-                if T_z > gap:
-                    delta_pred = z_pred[..., gap:] - z_pred[..., :-gap]
-                    delta_target = z_target[..., gap:] - z_target[..., :-gap]
-                    m_delta = m[..., gap:] * m[..., :-gap]
-                    loss_g = ((delta_pred - delta_target.detach()).pow(2) * m_delta).sum() / (m_delta.sum() * z_pred.shape[1]).clamp_min(1)
-                    delta_loss = delta_loss + loss_g
-            delta_loss = delta_loss / len(temporal_shifts)
         
         # Cluster loss
         mask_flat = ((1 - mask) * pad_mask).view(-1).bool()
@@ -319,7 +308,7 @@ def train(args, temporal_shifts=None):
         # Total loss
         progress = global_step / args.max_steps
         cluster_weight = args.cluster_weight_start + (args.cluster_weight_end - args.cluster_weight_start) * progress
-        loss = jepa_loss + cluster_weight * cluster_loss + delta_loss
+        loss = jepa_loss + cluster_weight * cluster_loss
         
         if torch.isnan(loss):
             if rank0():
@@ -335,7 +324,7 @@ def train(args, temporal_shifts=None):
         metrics['jepa'].append(jepa_loss.item())
         metrics['cluster'].append(cluster_loss.item())
         metrics['cw'].append(cluster_weight)
-        metrics['delta'].append(delta_loss.item())
+
         
         global_step += 1
         
@@ -345,7 +334,7 @@ def train(args, temporal_shifts=None):
         # Cleanup
         del z_online, z_pred, cluster_logits, z_target, soft_labels
         del wav_aug, wav_clean, mel, log_mel
-        del loss, jepa_loss, cluster_loss, delta_loss, mask, m, mask_flat, pad_mask
+        del loss, jepa_loss, cluster_loss, mask, m, mask_flat, pad_mask
         
         if global_step % 50 == 0:
             torch.cuda.empty_cache()
@@ -360,12 +349,11 @@ def train(args, temporal_shifts=None):
                     jepa=f"{avgs['jepa']:.4f}",
                     cluster=f"{avgs['cluster']:.4f}",
                     cw=f"{avgs['cw']:.3f}",
-                    delta=f"{avgs['delta']:.3f}",
                     hrs=f"{hours:.1f}"
                 )
                 
                 with open(os.path.join(args.output_dir, "log.txt"), "a") as f:
-                    f.write(f"{global_step}\t{avgs['jepa']:.6f}\t{avgs['cluster']:.6f}\t{avgs['cw']:.4f}\t{avgs['delta']:.4f}\t{hours:.2f}\n")
+                    f.write(f"{global_step}\t{avgs['jepa']:.6f}\t{avgs['cluster']:.6f}\t{avgs['cw']:.4f}\t{hours:.2f}\n")
         
         # Checkpointing
         if args.save_every > 0 and global_step % args.save_every == 0:
@@ -430,8 +418,8 @@ def parse_args():
     parser.add_argument('--snr_low_speech', type=float, default=-5.0, help='Min speech SNR')
     parser.add_argument('--snr_high_speech', type=float, default=5.0, help='Max speech SNR')
     
-    # Delta loss
-    parser.add_argument('--temporal_shifts', type=str, default='', help='Comma-separated frame shifts')
+
+
     
     # Checkpointing
     parser.add_argument('--save_every', type=int, default=1000, help='Checkpoint interval')
@@ -455,8 +443,8 @@ def main():
         print(f"  code_dim={args.code_dim}, conv_dim={args.conv_dim}")
         print(f"  num_layers={args.num_layers}, num_heads={args.num_heads}")
         print(f"  cluster_weight: {args.cluster_weight_start} -> {args.cluster_weight_end}")
-        if temporal_shifts:
-            print(f"  temporal_shifts={temporal_shifts}")
+
+
         print("=" * 60)
     
     train(args, temporal_shifts)
