@@ -1,1 +1,1 @@
-example
+Navigate each folder where you will find a separate README.md for each sub-task (i.e. train, evaluation)
