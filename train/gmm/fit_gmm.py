@@ -21,7 +21,11 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, IterableDataset
 from tqdm import tqdm
 
+
+
 from gmm import GradientGMM, compute_gmm_metrics
+from dataset import StreamingAudioDataset, collate_with_lengths
+
 from utils import (
     setup_distributed,
     cleanup_distributed,
@@ -31,107 +35,6 @@ from utils import (
     all_gather_with_sizes,
 )
 
-
-# -----------------------------------------------------------------------------
-# Dataset
-# -----------------------------------------------------------------------------
-
-class StreamingAudioDataset(IterableDataset):
-    """Stream audio from JSONL files with distributed sharding."""
-    
-    def __init__(
-        self,
-        data_dir: str,
-        sample_rate: int = 16000,
-        max_seconds: float = 15.0,
-        base_path: str = None,
-    ):
-        self.data_dir = data_dir
-        self.sample_rate = sample_rate
-        self.max_samples = int(sample_rate * max_seconds)
-        self.base_path = base_path
-    
-    def __iter__(self):
-        rank = get_rank()
-        world_size = get_world_size()
-        
-        # Handle DataLoader workers
-        worker_info = torch.utils.data.get_worker_info()
-        if worker_info is not None:
-            total_shards = world_size * worker_info.num_workers
-            shard_id = rank * worker_info.num_workers + worker_info.id
-        else:
-            total_shards = world_size
-            shard_id = rank
-        
-        # Shard files across workers
-        files = sorted(glob.glob(os.path.join(self.data_dir, "*.jsonl")))
-        files = files[shard_id::total_shards]
-        random.shuffle(files)
-        
-        for filepath in files:
-            yield from self._process_file(filepath)
-    
-    def _process_file(self, filepath: str):
-        """Process a single JSONL file."""
-        with open(filepath) as f:
-            for line in f:
-                try:
-                    obj = json.loads(line.strip())
-                    wav_path = obj.get("wav_path") or obj.get("audio_path") or obj.get("path")
-                    
-                    if not wav_path:
-                        continue
-                    
-                    if not os.path.isabs(wav_path) and self.base_path:
-                        wav_path = os.path.join(self.base_path, wav_path)
-                    
-                    wav = self._load_audio(wav_path)
-                    if wav is not None:
-                        yield wav
-                except Exception:
-                    continue
-    
-    def _load_audio(self, path: str) -> torch.Tensor:
-        """Load and preprocess audio file."""
-        try:
-            wav, sr = torchaudio.load(path)
-            
-            # Mono
-            if wav.shape[0] > 1:
-                wav = wav.mean(0, keepdim=True)
-            
-            # Resample
-            if sr != self.sample_rate:
-                wav = torchaudio.functional.resample(wav, sr, self.sample_rate)
-            
-            # Trim/crop
-            if wav.shape[-1] > self.max_samples:
-                start = random.randint(0, wav.shape[-1] - self.max_samples)
-                wav = wav[..., start:start + self.max_samples]
-            
-            return wav.squeeze(0)
-        except Exception:
-            return None
-
-
-def collate_with_lengths(hop: int):
-    """Collate function that tracks original lengths."""
-    def collate(batch):
-        batch = [x for x in batch if x is not None]
-        if not batch:
-            return None, None
-        
-        lengths = [x.shape[0] for x in batch]
-        T = max(lengths)
-        T = ((max(T, 4 * hop) + hop - 1) // hop) * hop
-        
-        stacked = torch.stack([F.pad(x, (0, T - x.shape[0])) for x in batch]).unsqueeze(1)
-        frame_lengths = [l // hop for l in lengths]
-        
-        return stacked, frame_lengths
-    
-    return collate
 
 
 # -----------------------------------------------------------------------------
@@ -215,13 +118,15 @@ class GMMTrainer:
         if is_main_process():
             self._print_config()
         
-        # Create dataloader
+        # Create dataloader        
         dataset = StreamingAudioDataset(
             self.args.data_dir,
             self.args.sample_rate,
             self.args.max_seconds,
             self.args.base_path,
+            seen_file=self.args.seen_file,
         )
+        
         dataloader = DataLoader(
             dataset,
             batch_size=self.args.batch_size,
@@ -444,7 +349,9 @@ def parse_args():
     )
     
     # Required
-    parser.add_argument('--data_dir', required=True, help='Directory containing JSONL files')
+
+    parser.add_argument('--data_dir', required=True, help='Comma-separated directories containing JSONL files')
+    
     parser.add_argument('--output_dir', required=True, help='Output directory')
     
     # GMM config
@@ -471,13 +378,20 @@ def parse_args():
     
     # Checkpointing
     parser.add_argument('--save_every', type=int, default=50_000_000, help='Save every N frames')
+
+    
     parser.add_argument('--resume', type=str, default=None, help='Resume from checkpoint')
+    parser.add_argument('--seen_file', type=str, default=None, help='Path to seen-hashes file for dedup')
+    
+
     
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    if args.seen_file is None:
+        args.seen_file = os.path.join(args.output_dir, "seen_hashes.pt")
     trainer = GMMTrainer(args)
     trainer.fit()
 
